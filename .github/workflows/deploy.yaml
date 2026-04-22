@@ -18,22 +18,36 @@ jobs:
       - name: Detect changed service
         id: detect
         run: |
-          SERVICE=$(git diff --name-only HEAD^ HEAD | cut -d/ -f1 | uniq)
-          echo "Detected: $SERVICE"
+          CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
+
+          echo "$CHANGED_FILES"
+
+          SERVICE=$(echo "$CHANGED_FILES" | grep -E '^service-(a|b|c)/' | cut -d/ -f1 | sort | uniq | head -n 1)
+
+          echo "Detected service: $SERVICE"
+
+          if [ -z "$SERVICE" ]; then
+            echo "No service changed. Exiting..."
+            exit 1
+          fi
+
           echo "service=$SERVICE" >> $GITHUB_OUTPUT
 
-  deploy:
+  build-push-deploy:
     needs: detect
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set SERVICE variable
         run: echo "SERVICE=${{ needs.detect.outputs.service }}" >> $GITHUB_ENV
 
-      - name: Configure AWS
+      - name: Debug SERVICE
+        run: echo "SERVICE=$SERVICE"
+
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
@@ -66,16 +80,6 @@ jobs:
 
             echo "Deploying $SERVICE..."
 
-            docker pull 198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
-
-            docker stop $SERVICE || true
-            docker rm $SERVICE || true
-
-            if [ "$SERVICE" = "service-a" ]; then PORT=5000; fi
-            if [ "$SERVICE" = "service-b" ]; then PORT=5001; fi
-            if [ "$SERVICE" = "service-c" ]; then PORT=5002; fi
-
-            docker run -d --name $SERVICE -p $PORT:$PORT \
-            198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
+            bash /home/ubuntu/deploy.sh $SERVICE
 
           EOF
