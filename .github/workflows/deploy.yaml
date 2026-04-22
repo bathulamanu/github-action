@@ -1,0 +1,81 @@
+name: Deploy Changed Service
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      service: ${{ steps.detect.outputs.service }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect changed service
+        id: detect
+        run: |
+          SERVICE=$(git diff --name-only HEAD^ HEAD | cut -d/ -f1 | uniq)
+          echo "Detected: $SERVICE"
+          echo "service=$SERVICE" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: detect
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set SERVICE variable
+        run: echo "SERVICE=${{ needs.detect.outputs.service }}" >> $GITHUB_ENV
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ap-south-1
+
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region ap-south-1 \
+          | docker login --username AWS --password-stdin 198302589618.dkr.ecr.ap-south-1.amazonaws.com
+
+      - name: Build Docker Image
+        run: |
+          docker build -t $SERVICE ./$SERVICE
+
+      - name: Tag Image
+        run: |
+          docker tag $SERVICE:latest 198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
+
+      - name: Push to ECR
+        run: |
+          docker push 198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
+
+      - name: Deploy to EC2
+        run: |
+          echo "${{ secrets.EC2_KEY }}" > key.pem
+          chmod 400 key.pem
+
+          ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@${{ secrets.EC2_IP }} << EOF
+
+            echo "Deploying $SERVICE..."
+
+            docker pull 198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
+
+            docker stop $SERVICE || true
+            docker rm $SERVICE || true
+
+            if [ "$SERVICE" = "service-a" ]; then PORT=5000; fi
+            if [ "$SERVICE" = "service-b" ]; then PORT=5001; fi
+            if [ "$SERVICE" = "service-c" ]; then PORT=5002; fi
+
+            docker run -d --name $SERVICE -p $PORT:$PORT \
+            198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
+
+          EOF
