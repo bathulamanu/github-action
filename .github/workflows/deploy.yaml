@@ -14,15 +14,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 🔥 IMPORTANT FIX
 
       - name: Detect changed service
         id: detect
         run: |
-          CHANGED_FILES=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }})
+          echo "Detecting changes..."
+
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+
+          echo "$CHANGED_FILES"
 
           SERVICE=$(echo "$CHANGED_FILES" | grep -E '^service-(a|b|c)/' | cut -d/ -f1 | sort | uniq | head -n 1)
 
-          echo "Detected: $SERVICE"
+          echo "Detected service: $SERVICE"
 
           if [ -z "$SERVICE" ]; then
             echo "No service changed"
@@ -41,6 +47,9 @@ jobs:
 
       - name: Set SERVICE variable
         run: echo "SERVICE=${{ needs.detect.outputs.service }}" >> $GITHUB_ENV
+
+      - name: Debug SERVICE
+        run: echo "SERVICE=$SERVICE"
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -66,7 +75,6 @@ jobs:
         run: |
           docker push 198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
 
-      # 🔥 COPY deploy.sh to EC2
       - name: Copy deploy.sh to EC2
         run: |
           echo "${{ secrets.EC2_KEY }}" > key.pem
@@ -74,15 +82,10 @@ jobs:
 
           scp -o StrictHostKeyChecking=no -i key.pem deploy.sh ubuntu@${{ secrets.EC2_IP }}:/home/ubuntu/
 
-      # 🚀 RUN deploy.sh
       - name: Execute deploy script
         run: |
           ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@${{ secrets.EC2_IP }} << EOF
-
             chmod +x /home/ubuntu/deploy.sh
-
             echo "Deploying $SERVICE..."
-
             bash /home/ubuntu/deploy.sh $SERVICE
-
           EOF
