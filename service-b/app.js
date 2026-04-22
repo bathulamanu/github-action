@@ -5,6 +5,7 @@ app.get('/', (req, res) => {
   res.send('Hello manohar from Service B');
 });
 
-app.listen(5001, () => {
+// ✅ FIX HERE
+app.listen(5000, '0.0.0.0', () => {
   console.log('Service B running on port 5000');
 });
