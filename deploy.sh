@@ -3,8 +3,9 @@
 SERVICE=$1
 ECR_URL="198302589618.dkr.ecr.ap-south-1.amazonaws.com"
 
-echo "Deploying service: $SERVICE"
+echo "Deploying $SERVICE..."
 
+# Map service → port
 case $SERVICE in
   service-a) PORT=5000 ;;
   service-b) PORT=5001 ;;
@@ -14,18 +15,18 @@ esac
 
 echo "Using port: $PORT"
 
-# Login to ECR (will work after IAM role)
+# Login to ECR
 aws ecr get-login-password --region ap-south-1 \
-| sudo docker login --username AWS --password-stdin $ECR_URL
+| docker login --username AWS --password-stdin $ECR_URL
 
-# Pull image
-sudo docker pull $ECR_URL/$SERVICE:latest
+# Pull latest image
+docker pull $ECR_URL/$SERVICE:latest
 
-# Stop/remove old container
-sudo docker rm -f $SERVICE || true
+# Stop old container
+docker rm -f $SERVICE || true
 
-# Run container
-sudo docker run -d \
+# Run new container
+docker run -d \
   --name $SERVICE \
   -p $PORT:5000 \
   --restart always \
