@@ -1,4 +1,4 @@
-name: Blue-Green Deploy
+name: Auto Blue-Green Deploy
 
 on:
   push:
@@ -10,37 +10,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ✅ Checkout (FULL history)
+      # ✅ Checkout
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ✅ Detect service (FIXED)
-      - name: Detect service
-        run: |
-          echo "Detecting changed service..."
-
-          if git rev-parse HEAD~1 >/dev/null 2>&1; then
-            CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
-          else
-            echo "No previous commit, using current commit only"
-            CHANGED_FILES=$(git show --pretty="" --name-only HEAD)
-          fi
-
-          echo "$CHANGED_FILES"
-
-          SERVICE=$(echo "$CHANGED_FILES" \
-            | grep -E '^service-(a|b|c)/' \
-            | cut -d/ -f1 | sort | uniq | head -n 1)
-
-          if [ -z "$SERVICE" ]; then
-            echo "No service detected, defaulting to service-a"
-            SERVICE="service-a"
-          fi
-
-          echo "SERVICE=$SERVICE" >> $GITHUB_ENV
-          echo "Using SERVICE=$SERVICE"
+      # ✅ Set service (simple for now)
+      - name: Set service
+        run: echo "SERVICE=service-a" >> $GITHUB_ENV
 
       # ✅ AWS login
       - name: Configure AWS
@@ -50,63 +28,82 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           aws-region: ap-south-1
 
-      # ✅ ECR login
+      # 🔥 STEP 1: Detect CURRENT active target group
+      - name: Detect current environment
+        id: detect
+        run: |
+          CURRENT_TG=$(aws elbv2 describe-rules \
+            --rule-arn ${{ secrets.RULE_ARN }} \
+            --query 'Rules[0].Actions[0].TargetGroupArn' \
+            --output text)
+
+          echo "Current TG: $CURRENT_TG"
+
+          if [ "$CURRENT_TG" == "${{ secrets.TG_BLUE }}" ]; then
+            echo "TARGET_TG=${{ secrets.TG_GREEN }}" >> $GITHUB_ENV
+            echo "TARGET_IP=${{ secrets.EC2_GREEN_IP }}" >> $GITHUB_ENV
+            echo "Deploying to GREEN"
+          else
+            echo "TARGET_TG=${{ secrets.TG_BLUE }}" >> $GITHUB_ENV
+            echo "TARGET_IP=${{ secrets.EC2_IP }}" >> $GITHUB_ENV
+            echo "Deploying to BLUE"
+          fi
+
+      # ✅ Login to ECR
       - name: Login to ECR
         run: |
           aws ecr get-login-password --region ap-south-1 \
           | docker login --username AWS --password-stdin 198302589618.dkr.ecr.ap-south-1.amazonaws.com
 
       # ✅ Build
-      - name: Build Docker Image
-        run: |
-          docker build -t $SERVICE ./$SERVICE
+      - name: Build
+        run: docker build -t $SERVICE ./$SERVICE
 
       # ✅ Tag
-      - name: Tag Image
+      - name: Tag
         run: |
           docker tag $SERVICE:latest \
           198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
 
       # ✅ Push
-      - name: Push to ECR
+      - name: Push
         run: |
           docker push 198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
 
-      # ✅ Prepare SSH key
+      # ✅ Prepare SSH
       - name: Prepare SSH key
         run: |
           echo "${{ secrets.EC2_KEY }}" > key.pem
           chmod 400 key.pem
 
-      # ✅ Copy script to GREEN
-      - name: Copy deploy.sh to GREEN
+      # ✅ Copy deploy script
+      - name: Copy deploy.sh
         run: |
           scp -o StrictHostKeyChecking=no -i key.pem deploy.sh \
-          ubuntu@${{ secrets.EC2_GREEN_IP }}:/home/ubuntu/
+          ubuntu@$TARGET_IP:/home/ubuntu/
 
-      # ✅ Deploy to GREEN
-      - name: Deploy to GREEN
+      # ✅ Deploy to TARGET (auto blue/green)
+      - name: Deploy
         run: |
-          ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@${{ secrets.EC2_GREEN_IP }} << EOF
+          ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@$TARGET_IP << EOF
             chmod +x /home/ubuntu/deploy.sh
-            echo "Deploying $SERVICE on GREEN..."
+            echo "Deploying $SERVICE..."
             bash /home/ubuntu/deploy.sh $SERVICE
           EOF
 
       # ✅ Wait for health
-      - name: Wait for GREEN healthy
+      - name: Wait for healthy
         run: |
           aws elbv2 wait target-in-service \
-            --target-group-arn ${{ secrets.TG_GREEN }}
+            --target-group-arn $TARGET_TG
 
-      # 🔥 Switch traffic
-      - name: Switch to GREEN
+      # 🔥 FINAL: SWITCH automatically
+      - name: Switch traffic
         run: |
-          echo "Switching traffic to GREEN..."
+          echo "Switching traffic..."
           aws elbv2 modify-rule \
             --rule-arn ${{ secrets.RULE_ARN }} \
-            --actions Type=forward,TargetGroupArn=${{ secrets.TG_GREEN }}
+            --actions Type=forward,TargetGroupArn=$TARGET_TG
 
-      # ✅ Done
       - name: Done
-        run: echo "🚀 Deployment complete"
+        run: echo "🚀 Auto Blue-Green deployment complete"
