@@ -16,7 +16,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ✅ Set service (simple for now)
+      # ✅ Set service
       - name: Set service
         run: echo "SERVICE=service-a" >> $GITHUB_ENV
 
@@ -28,25 +28,28 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           aws-region: ap-south-1
 
-      # 🔥 STEP 1: Detect CURRENT active target group
+      # 🔥 Detect current environment
       - name: Detect current environment
-        id: detect
         run: |
           CURRENT_TG=$(aws elbv2 describe-rules \
             --rule-arn ${{ secrets.RULE_ARN }} \
             --query 'Rules[0].Actions[0].TargetGroupArn' \
             --output text)
 
-          echo "Current TG: $CURRENT_TG"
+          echo "Current Target Group: $CURRENT_TG"
 
           if [ "$CURRENT_TG" == "${{ secrets.TG_BLUE }}" ]; then
+            echo "CURRENT=BLUE" >> $GITHUB_ENV
+            echo "TARGET=GREEN" >> $GITHUB_ENV
             echo "TARGET_TG=${{ secrets.TG_GREEN }}" >> $GITHUB_ENV
             echo "TARGET_IP=${{ secrets.EC2_GREEN_IP }}" >> $GITHUB_ENV
-            echo "Deploying to GREEN"
+            echo "➡️ Deploying to GREEN"
           else
+            echo "CURRENT=GREEN" >> $GITHUB_ENV
+            echo "TARGET=BLUE" >> $GITHUB_ENV
             echo "TARGET_TG=${{ secrets.TG_BLUE }}" >> $GITHUB_ENV
             echo "TARGET_IP=${{ secrets.EC2_IP }}" >> $GITHUB_ENV
-            echo "Deploying to BLUE"
+            echo "➡️ Deploying to BLUE"
           fi
 
       # ✅ Login to ECR
@@ -56,54 +59,56 @@ jobs:
           | docker login --username AWS --password-stdin 198302589618.dkr.ecr.ap-south-1.amazonaws.com
 
       # ✅ Build
-      - name: Build
+      - name: Build Docker Image
         run: docker build -t $SERVICE ./$SERVICE
 
       # ✅ Tag
-      - name: Tag
+      - name: Tag Image
         run: |
           docker tag $SERVICE:latest \
           198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
 
       # ✅ Push
-      - name: Push
+      - name: Push to ECR
         run: |
           docker push 198302589618.dkr.ecr.ap-south-1.amazonaws.com/$SERVICE:latest
 
-      # ✅ Prepare SSH
+      # ✅ Prepare SSH key
       - name: Prepare SSH key
         run: |
           echo "${{ secrets.EC2_KEY }}" > key.pem
           chmod 400 key.pem
 
       # ✅ Copy deploy script
-      - name: Copy deploy.sh
+      - name: Copy deploy.sh to target
         run: |
           scp -o StrictHostKeyChecking=no -i key.pem deploy.sh \
           ubuntu@$TARGET_IP:/home/ubuntu/
 
-      # ✅ Deploy to TARGET (auto blue/green)
-      - name: Deploy
+      # ✅ Deploy
+      - name: Deploy to target
         run: |
           ssh -o StrictHostKeyChecking=no -i key.pem ubuntu@$TARGET_IP << EOF
             chmod +x /home/ubuntu/deploy.sh
-            echo "Deploying $SERVICE..."
+            echo "Deploying $SERVICE on $TARGET..."
             bash /home/ubuntu/deploy.sh $SERVICE
           EOF
 
       # ✅ Wait for health
-      - name: Wait for healthy
+      - name: Wait for target healthy
         run: |
+          echo "Waiting for $TARGET to become healthy..."
           aws elbv2 wait target-in-service \
             --target-group-arn $TARGET_TG
 
-      # 🔥 FINAL: SWITCH automatically
+      # 🔥 Switch traffic
       - name: Switch traffic
         run: |
-          echo "Switching traffic..."
+          echo "Switching traffic to $TARGET..."
           aws elbv2 modify-rule \
             --rule-arn ${{ secrets.RULE_ARN }} \
             --actions Type=forward,TargetGroupArn=$TARGET_TG
 
+      # ✅ Done
       - name: Done
         run: echo "🚀 Auto Blue-Green deployment complete"
